@@ -1,0 +1,70 @@
+{
+  "render_type": "EHT interferometric Stokes-I reconstruction",
+  "data_source": [
+    "D:\\Astrorecon\\AstroRecon\\data\\raw\\EHTC_FirstSgrAResults_May2022\\uvfits\\ER6_SGRA_2017_097_hi_hops_netcal-LMTcal_StokesI.uvfits"
+  ],
+  "source_kind": "calibrated UVFITS visibility data",
+  "target": "SGRA",
+  "polarization": "Stokes I only; this release has no usable Q/U polarization",
+  "ehtim_version": "1.2.4",
+  "visibility_count_after_averaging": 2831,
+  "station_count": 9,
+  "frequency_hz": 229070703125.0,
+  "nominal_resolution_uas": 23.72384091570375,
+  "image_shape": [
+    64,
+    64
+  ],
+  "field_of_view_uas": 150.0,
+  "averaging_seconds": 60.0,
+  "max_iterations": 300,
+  "major_iterations": 5,
+  "flux_prior_jy": 2.1989134258843204,
+  "survey_row": {
+    "Unnamed: 0": 0,
+    "syserr": 0.0,
+    "ref_type": "dime",
+    "ref_scale": 2.0,
+    "deblurr": true,
+    "psd_noise": true,
+    "psd_a": 0.015,
+    "psd_u0": 2.0,
+    "psd_b": 2.0,
+    "psd_c": 2.0,
+    "fwhm": 80,
+    "amp": 0.1,
+    "simple": 0.1,
+    "tv": 0.1,
+    "tv2": 0.0
+  },
+  "data_terms": {
+    "amp": 0.1,
+    "cphase": 1.0,
+    "logcamp": 1.0
+  },
+  "regularizer_terms": {
+    "simple": 0.1,
+    "tv": 0.1,
+    "tv2": 0.0,
+    "flux": 1.0
+  },
+  "final_data_chi_squared": {
+    "amp": 6.694727943035702,
+    "cphase": 0.3607242688675382,
+    "logcamp": 0.648971837835624
+  },
+  "optimizer_objective": 4.313249213714951,
+  "epsilon_tv": 1e-10,
+  "fourier_operator": "direct (portable; NFFT optional)",
+  "parameter_reference": "Official EHT parameter survey row 0 from https://raw.githubusercontent.com/eventhorizontelescope/2022-D02-02/main/eht-imaging/params/eht-imaging_097_params.csv.",
+  "preprocessing": "EHT collaboration preimcal.py from release 2022-D02-02; survey-selected systematic, refractive, PSD, time-average, and scattering-deblur settings applied.",
+  "preprocessing_helper": "D:\\Astrorecon\\AstroRecon\\data\\raw\\EHTC_FirstSgrAResults_May2022\\pipeline_reference\\preimcal.py",
+  "caveat": "One epoch/band Stokes-I image is not tomography and cannot recover magnetic-field polarization. NFFT is unavailable here; the direct Fourier operator is slower than the official nfft configuration.",
+  "code_modules": [
+    "train.py",
+    "src/fits_router.py",
+    "src/uvfits_imaging.py",
+    "ehtim"
+  ],
+  "png_metadata": "outputs_sgra_real\\renders\\uvfits_reconstruction.metadata.json"
+}

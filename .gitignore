@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+envs/
+
+# Virtual environments / package dirs
+git repos/
+Git/
+
+# Data and outputs (regenerable or too large for git)
+data/
+outputs/
+state/
+**/outputs/
+**/data/raw/
+
+# Logs and temp scripts
+*.log
+*.out
+_t*.py
+_t*.out
+_repro*.py
+_repro*.log
+_patch*.py
+_run_*.log
+_shot.py
+
+# OS / IDE
+.vscode/
+Thumbs.db
+.DS_Store
+
+# Build artifacts
+*.vtk
+*.npy
+*.uvfits
+*.fits
+*.tgz
+*.pickle
+*.mp3

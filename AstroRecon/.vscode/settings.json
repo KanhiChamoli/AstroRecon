@@ -1,6 +1,8 @@
 {
   "python.defaultInterpreterPath": "D:\\miniconda_envs\\astrorecon\\python.exe",
-  "python.terminal.activateEnvironment": true,
+  "python.analysis.extraPaths": ["D:\\Astrorecon\\AstroRecon"],
+  "python.terminal.activateEnvironment": false,
   "python-envs.defaultEnvManager": "ms-python.python:conda",
-  "python-envs.defaultPackageManager": "ms-python.python:conda"
+  "python-envs.defaultPackageManager": "ms-python.python:conda",
+  "CodeGPT.apiKey": "CodeGPT Plus Beta"
 }

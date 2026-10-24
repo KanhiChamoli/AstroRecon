@@ -1,0 +1,10 @@
+astropy>=6.0
+astroquery>=0.4
+ehtim==1.2.4
+matplotlib>=3.8
+mpol>=0.2.0
+numpy>=1.24
+PyQt5>=5.15
+PyQtWebEngine>=5.15
+scipy>=1.10
+torch>=2.0

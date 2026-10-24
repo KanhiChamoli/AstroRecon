@@ -1,0 +1,7 @@
+astropy>=6.0
+matplotlib>=3.8
+numpy>=1.24
+torch>=2.0
+pywwt>=0.26
+jupyterlab>=4.0
+ipywidgets>=8.0
