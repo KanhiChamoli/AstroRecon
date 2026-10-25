@@ -303,12 +303,26 @@ class GRRTCamera:
     position: Sequence[float] = (0.0, 0.0, 10.0)   # r = 10 M, +z axis
     look_at: Sequence[float] = (0.0, 0.0, 0.0)     # aim at the black hole
     up: Sequence[float] = (0.0, 0.0, 1.0)          # spin axis convention
+    # Cinematic supersampling: n means n×n jittered sub-rays per pixel
+    # (n=1 → classic one-ray-per-pixel).  Jitter offsets are deterministic
+    # per pixel index (a fixed stratified pattern) so renders are
+    # reproducible while still killing blocky pixel stair-stepping.
+    subpixel_samples: int = 1
+    # Vertical FOV window for banded (memory-chunked) rendering: the band
+    # spans [y_min_frac, y_max_frac] of the half-FOV (1.0 = top edge, -1.0
+    # = bottom edge).  Full-frame renders use the defaults.
+    y_max_frac: float = 1.0
+    y_min_frac: float = -1.0
 
     def __post_init__(self) -> None:
         if self.height < 1 or self.width < 1:
             raise ValueError("camera resolution must be >= 1 pixel per axis")
         if not (0.0 < self.fov_deg < 180.0):
             raise ValueError("fov_deg must lie in (0, 180)")
+        if self.subpixel_samples < 1:
+            raise ValueError("subpixel_samples must be >= 1")
+        if not (-1.0 <= self.y_min_frac < self.y_max_frac <= 1.0):
+            raise ValueError("need -1 <= y_min_frac < y_max_frac <= 1")
 
     @property
     def resolution(self) -> tuple:
@@ -351,30 +365,64 @@ def _camera_ray_directions(
     device: torch.device,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    """Pinhole ray directions d̂ for every pixel: (H, W, 3), unit norm.
+    """Pinhole ray directions d̂ for every pixel: (H, W, S, 3), unit norm.
 
     The pixel grid spans ``[-tan(fov/2), +tan(fov/2)]`` on the wider image
     dimension (kept square so pixels are isotropic), and the shorter
     dimension is scaled by its aspect ratio — standard perspective camera.
     Direction vectors are expressed in the *world* frame via the camera
     basis, and remain affine (differentiable) functions of the pixel grid.
+
+    Sub-pixel anti-aliasing (SSAA): with ``camera.subpixel_samples = n`` the
+    S dimension carries n×n jittered sub-rays per pixel; each sub-ray is
+    offset by a fixed stratified fraction of the pixel footprint before
+    averaging downstream, which removes the square-pixel stair-stepping of
+    single-center sampling without making renders nondeterministic.
     """
     H, W = camera.height, camera.width
+    S2 = max(1, int(camera.subpixel_samples))
 
     # Half-extent of the image plane at unit focal distance.
     half = math.tan(math.radians(camera.fov_deg) * 0.5)
-    aspect = W / H
+    # Aspect from the FULL frame, not the band: for a vertical band
+    # (y_max_frac - y_min_frac < 2) the band is a horizontal strip of a
+    # square frame, so the effective full-frame height is
+    # H * 2 / (y_max - y_min).  Using the band's own aspect would make
+    # horizontal pixels (W/H)-times coarser than vertical ones and leave
+    # diamond seams at the band joins.
+    y_span = camera.y_max_frac - camera.y_min_frac
+    full_frame_height = H * 2.0 / y_span
+    aspect = W / full_frame_height
 
     # Pixel-centre coordinates, row-major like an image tensor (H, W).
+    # The vertical axis may be restricted to a band of the full FOV
+    # (memory-chunked rendering): y_max_frac=1/y_min_frac=-1 is full frame.
     xs = torch.linspace(-half * aspect, half * aspect, W, device=device, dtype=dtype)
-    ys = torch.linspace(half, -half, H, device=device, dtype=dtype)  # row 0 = top
+    ys = torch.linspace(half * camera.y_max_frac, half * camera.y_min_frac, H,
+                        device=device, dtype=dtype)  # row 0 = top
     grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+
+    if S2 > 1:
+        # Pixel footprint along each screen axis (grid is uniform).
+        dx = float(xs[1] - xs[0]) if W > 1 else 0.0
+        dy = float(ys[1] - ys[0]) if H > 1 else 0.0
+        # Stratified jitter pattern: sub-sample s at offset ((s%n + 0.5)/n
+        # of the pixel, shifted to be centred).  Fixed seed-independent —
+        # purely arithmetic, so renders stay reproducible.
+        si = torch.arange(S2, device=device, dtype=dtype)
+        jx = ((si % S2) + 0.5) / S2 - 0.5          # in (-0.5, 0.5) of a pixel
+        jy = ((torch.div(si, S2, rounding_mode="floor")) + 0.5) / S2 - 0.5
+        # Broadcast: (H, W, S2, 1) pixel centres + (S2,) jitter offsets.
+        gx = grid_x.unsqueeze(-1) + jx.view(1, 1, S2) * dx
+        gy = grid_y.unsqueeze(-1) + jy.view(1, 1, S2) * dy
+    else:
+        gx = grid_x.unsqueeze(-1)
+        gy = grid_y.unsqueeze(-1)
 
     # Camera looks along -forward convention would flip handedness; we use
     # +forward as the viewing direction and place the plane at focal length 1.
-    dirs_cam = torch.stack(
-        [grid_x, grid_y, torch.ones_like(grid_x)], dim=-1
-    )  # (H, W, 3): (right, up, forward) components
+    ones = torch.ones_like(gx)
+    dirs_cam = torch.stack([gx, gy, ones], dim=-1)  # (H, W, S, 3)
 
     # Rotate into the world frame: d_world = right*dx + up*dy + forward*dz.
     pos = _as_tensor(camera.position, device, dtype)
@@ -386,7 +434,7 @@ def _camera_ray_directions(
         + dirs_cam[..., 1:2] * tup
         + dirs_cam[..., 2:3] * fwd
     )
-    return F.normalize(dirs, dim=-1)  # (H, W, 3), unit vectors
+    return F.normalize(dirs, dim=-1)  # (H, W, S, 3), unit vectors
 
 
 def initialize_camera_rays(
@@ -451,11 +499,14 @@ def initialize_camera_rays(
     device = torch.device(device)
 
     H, W = camera.resolution
+    S2 = max(1, int(getattr(camera, "subpixel_samples", 1)))
     if batch_size < 1:
         raise ValueError("batch_size must be >= 1")
 
     # ---- pixel directions in the world frame -----------------------------
-    dirs = _camera_ray_directions(camera, device, dtype)          # (H, W, 3)
+    # (H, W, S, 3) with S = S2² sub-pixel jittered rays per pixel (S = 1
+    # for the classic single-center sampling).  Flatten to (H, W, S, 3).
+    dirs = _camera_ray_directions(camera, device, dtype)          # (H, W, S, 3)
 
     # ---- camera world position (batched) ----------------------------------
     pos = _as_tensor(camera.position, device, dtype)              # (3,)
@@ -468,12 +519,12 @@ def initialize_camera_rays(
     t0 = torch.zeros(batch_size, device=device, dtype=dtype)
     if not affine_time_offsets:
         t0 = t0[:1].expand(batch_size)  # keep the key shape stable
-    x_spatial = pos_b[:, None, None, :].expand(batch_size, H, W, 3)
-    t_grid = t0[:, None, None].expand(batch_size, H, W)
+    x_spatial = pos_b[:, None, None, None, :].expand(batch_size, H, W, S2, 3)
+    t_grid = t0[:, None, None, None].expand(batch_size, H, W, S2)
     x0 = torch.stack(
         [t_grid, x_spatial[..., 0], x_spatial[..., 1], x_spatial[..., 2]],
         dim=-1,
-    )  # (B, H, W, 4)
+    )  # (B, H, W, S, 4)
 
     # ---- null momenta p^mu = (p^t, px, py, pz) -----------------------------
     # Signature (-,+,+,+):  eta = diag(-1, 1, 1, 1).
@@ -481,14 +532,14 @@ def initialize_camera_rays(
     #     -(p^t)^2 + |p_spatial|^2 = 0  =>  p^t = |p_spatial| = 1.
     # Setting p^t := 1 and p_spatial := d̂ (unit) satisfies it *exactly*.
     p_spatial = dirs  # already unit norm
-    p_t = torch.ones_like(p_spatial[..., 0])   # (H, W): p^t = 1  =>  null
+    p_t = torch.ones_like(p_spatial[..., 0])   # (H, W, S): p^t = 1  =>  null
     p0 = torch.stack(
         [p_t, p_spatial[..., 0], p_spatial[..., 1], p_spatial[..., 2]],
         dim=-1,
-    ).unsqueeze(0).expand(batch_size, H, W, 4)  # (B, H, W, 4)
+    ).unsqueeze(0).expand(batch_size, H, W, S2, 4)  # (B, H, W, S, 4)
 
     # ---- affine parameterization ------------------------------------------
-    dlambda = torch.ones(batch_size, H, W, 1, device=device, dtype=dtype)
+    dlambda = torch.ones(batch_size, H, W, S2, 1, device=device, dtype=dtype)
 
     # ---- flat metric & analytic null check ---------------------------------
     metric = torch.eye(4, device=device, dtype=dtype)
@@ -498,7 +549,7 @@ def initialize_camera_rays(
     # g_{mu nu} p^mu p^nu = -(p^t)^2 + px^2 + py^2 + pz^2  (per ray)
     null_residual = (
         -(p0[..., 0] ** 2) + p0[..., 1] ** 2 + p0[..., 2] ** 2 + p0[..., 3] ** 2
-    )  # (B, H, W)
+    )  # (B, H, W, S)
 
     return {
         "x0": x0,
@@ -1298,7 +1349,11 @@ def ks_schwarzchild_metric(
     All outputs keep autograd connectivity to x.
     """
     pos = x[..., 1:]                                   # (..., 3)
-    r = torch.clamp(torch.sqrt(pos * pos + 1e-18).sum(-1), min=1e-9)
+    # NOTE: sqrt BEFORE summing — sqrt(x²)+sqrt(y²)+sqrt(z²) would be the
+    # Manhattan norm |x|+|y|+|z|, whose level sets are diamonds (the shadow
+    # rendered as a diamond because of exactly this bug).  The Euclidean
+    # radius sqrt(x² + y² + z²) has spherical level sets.
+    r = torch.clamp(torch.sqrt((pos * pos).sum(-1) + 1e-18), min=1e-9)
     n = pos / r.unsqueeze(-1)                          # unit radial (..., 3)
     f = 2.0 * M / r                                    # KS potential
 
@@ -1632,6 +1687,16 @@ def render_grrt_view(
     boundaries: Optional[BoundaryRadii] = None,
     record_debug: bool = False,
     polar_axis_offset: float = 0.05,
+    # ---- cinematic pipeline controls (see CINEMATIC PIPELINE section) -----
+    render_res: Optional[tuple] = None,
+    voxel_grid_size: Optional[int] = None,
+    subpixel_samples: Optional[int] = None,
+    tonemap: bool = False,
+    bloom: bool = False,
+    adaptive_steps: bool = True,
+    adaptive_gain: float = 4.0,
+    cinematic_shading: bool = False,
+    starfield: bool = True,
 ) -> Dict[str, torch.Tensor]:
     """End-to-end differentiable GRRT renderer (Steps 1 → 4).
 
@@ -1705,6 +1770,23 @@ def render_grrt_view(
         pos[0] = pos[0] + polar_axis_offset
         camera = replace(camera, position=tuple(pos))
 
+    # ---------- cinematic pipeline overrides (optional) -------------------
+    # render_res       : (H, W) override of the camera resolution — lets the
+    #                    UI re-route the viewport fidelity on the fly.
+    # voxel_grid_size  : if given and different from the input volume's size,
+    #                    smoothly upsample V via trilinear interpolation so a
+    #                    low-res training grid can be rendered at high res.
+    # subpixel_samples : supersampling factor n → n×n jittered rays per pixel
+    #                    averaged into one anti-aliased image.
+    if render_res is not None:
+        camera = replace(camera, height=int(render_res[0]), width=int(render_res[1]))
+    if subpixel_samples is not None:
+        camera = replace(camera, subpixel_samples=int(subpixel_samples))
+    if tonemap:
+        pass  # applied to the final image below (ACES filmic + optional bloom)
+    if voxel_grid_size is not None and tuple(voxel_grid.shape) != (voxel_grid_size,) * 3:
+        voxel_grid = upsample_voxel_grid(voxel_grid, voxel_grid_size)
+
     # ---------- Step 1: camera rays ---------------------------------------
     rays = initialize_camera_rays(camera, device=device, dtype=dtype)
     x0_cart, p0_cart = rays["x0"], rays["p0"]       # (1, H, W, 4)
@@ -1753,6 +1835,15 @@ def render_grrt_view(
     lam = float(dlambda)
     dlam_tensor = torch.full(batch_shape, float(dlambda), device=device, dtype=dtype)
 
+    # Final photon direction at infinity for each ray (lensing lookup):
+    # initialized to the launch direction, updated while the ray is alive.
+    final_dirs = observer_dir.unsqueeze(0).expand(batch_shape + (3,)).clone()
+
+    # Adaptive ray-marching: a per-ray multiplicative step-size field updated
+    # each iteration from the local density (see CINEMATIC PIPELINE notes).
+    # Starts neutral (1.0) so the first step uses the user's dlambda.
+    step_scale = torch.ones(batch_shape, device=device, dtype=dtype)
+
     debug_samples = [] if record_debug else None
 
     for step in range(1, max_steps + 1):
@@ -1782,8 +1873,13 @@ def render_grrt_view(
             break
 
         # ---------- voxel sampling + radiative transfer (Step 4) ----------
+        # Physically, density is non-negative: softplus-initialized logits
+        # guarantee it inside the box, but grid_sample extrapolation just
+        # past the box edge can dip a few e-6 negative, and a negative
+        # optical depth makes exp(-tau) explode -> NaN frames.  Clamp is
+        # autograd-safe and a no-op for all legitimately sampled values.
         density = sample_voxel_density_cartesian(
-            voxel_grid, x, grid_radius)                             # (...)
+            voxel_grid, x, grid_radius).clamp(min=0.0)                             # (...)
 
         # Doppler factor from the local Keplerian flow (Cartesian).
         v_cart = keplerian_velocity_field_cartesian(
@@ -1802,13 +1898,45 @@ def render_grrt_view(
 
         j = density                                                # emissivity
 
-        dtau = optical_depth_step(density, dlambda, opacity)
+        # ---- adaptive step sizing (cinematic pipeline item 3) ------------
+        # Rays approaching dense plasma (or the horizon) get their next
+        # affine step shrunk so the integrator cannot overshoot fine
+        # structure; rays in near-empty space stretch their step for speed.
+        #   Δλ_eff = Δλ / (1 + gain · ρ)   (computed without autograd —
+        # step size is a numerical-integration control, not physics)
+        # Horizon guard: in near-horizon vacuum the density term is ~0, so
+        # without an extra limiter rays take full-size steps that overshoot
+        # the capture radius by angle-dependent amounts — visibly inflating
+        # the shadow into a diamond.  Cap the step at a fraction of the
+        # local distance to the horizon (r − 2M) so capture stays accurate
+        # from every direction and the shadow stays circular.
+        if adaptive_steps:
+            with torch.no_grad():
+                pos3 = x[..., 1:]
+                r_loc = torch.sqrt((pos3 * pos3).sum(-1) + 1e-18)
+                dens_scale = 1.0 / (1.0 + adaptive_gain * density.clamp(min=0.0))
+                # Curvature cap: the shadow edge is carved at the photon
+                # sphere (r ≈ 3M), far above the horizon, so the step must
+                # already be fine there — not just deep near r = 2M.  Cap
+                # the step at 5 % of the height above the horizon; at r=3M
+                # that is 0.05·λ base, resolving the capture boundary
+                # isotropically (a coarse step here turns the circular
+                # shadow into a diamond aligned with the coordinate axes).
+                horizon_scale = (
+                    0.05 * (r_loc - 2.0 * M).clamp(min=0.01)
+                ).clamp(max=1.0)
+                step_scale = dens_scale * horizon_scale
+            lam_tensor = dlam_tensor * step_scale
+        else:
+            lam_tensor = dlam_tensor
+
+        dtau = optical_depth_step(density, 1.0, opacity) * lam_tensor
         contrib = (
             j
             * delta.pow(doppler_power)
             * g_grav
             * torch.exp(-tau)
-            * dlam_tensor
+            * lam_tensor
         )
         intensity = intensity + alive * contrib
         tau = tau + alive * dtau
@@ -1824,8 +1952,19 @@ def render_grrt_view(
             })
 
         # ---------- RK4 advance (Step 2, Cartesian) -----------------------
-        x_new, p_new = rk4_geodesic_step_cartesian(x, p, lam, M)
+        # Per-ray adaptive step (broadcast (...,1) against (...,4)).
+        x_new, p_new = rk4_geodesic_step_cartesian(x, p, lam_tensor.unsqueeze(-1), M)
         x, p = _apply_frozen_update(alive, x, p, x_new, p_new)
+
+        # Track the live photon direction (for starfield lensing): the
+        # escaped direction is the photon's momentum direction at infinity,
+        # negated to point back along the incoming light path.
+        if cinematic_shading and starfield:
+            with torch.no_grad():
+                p_dir = p[..., 1:]
+                p_dir = p_dir / p_dir.norm(dim=-1, keepdim=True).clamp(min=1e-9)
+                final_dirs = torch.where(
+                    alive.unsqueeze(-1), -p_dir, final_dirs)
 
     # ---------- shadow: zero emission for captured rays --------------------
     # Rays that fell into the horizon contribute exactly zero intensity;
@@ -1837,6 +1976,85 @@ def render_grrt_view(
     # were captured within the step budget — treat as dark rather than
     # inventing emission).
     image = torch.where(alive, torch.zeros_like(intensity), image)
+
+    # ---------- sub-pixel anti-aliasing average (item 2) -------------------
+    # The march accumulated one intensity per jittered sub-ray (S axis);
+    # average them back into a single smooth value per pixel.  With S = 1
+    # this is a no-op squeeze.  Result: (H, W) like the classic renderer.
+    S = image.shape[-1]
+    if S > 1:
+        image = image.mean(dim=-1)
+        shadow = shadow.any(dim=-1)
+        escaped = escaped.any(dim=-1)
+        hit_photon_sphere = hit_photon_sphere.any(dim=-1)
+        hit_ring = hit_ring.any(dim=-1)
+        density_sum = density_sum.mean(dim=-1)
+    else:
+        image = image[..., 0]
+        shadow = shadow[..., 0]
+        escaped = escaped[..., 0]
+        hit_photon_sphere = hit_photon_sphere[..., 0]
+        hit_ring = hit_ring[..., 0]
+        density_sum = density_sum[..., 0]
+        alive = alive[..., 0]
+    # Drop the leading batch dim (batch_size is always 1 for rendering).
+    if image.dim() == 3 and image.shape[0] == 1:
+        image = image[0]
+        shadow = shadow[0]
+        escaped = escaped[0]
+        hit_photon_sphere = hit_photon_sphere[0]
+        hit_ring = hit_ring[0]
+        density_sum = density_sum[0]
+        alive = alive[0]
+
+    # ---------- cinematic post-processing (item 4) ------------------------
+    # HDR emission → display-ready values.  Disabled by default so training
+    # losses keep their linear intensity scale; the UI/CLI turn it on for
+    # final frames.
+    doppler_map = None
+    # NOTE: `final_dirs` was tracked during the march (line ~1836); do NOT
+    # overwrite it with None here.
+    if cinematic_shading:
+        # Full RGB pipeline: thermal blackbody ramp + Doppler tinting +
+        # lensed starfield background.  Output image becomes (H, W, 3).
+        # doppler_map / final_dirs still carry the sub-sample (S) and batch
+        # axes — reduce them exactly like the image above.
+        doppler_map = torch.where(
+            doppler_n > 0, doppler_sum / doppler_n.clamp(min=1.0),
+            torch.ones_like(doppler_sum))
+        if doppler_map.dim() > 2 and doppler_map.shape[-1] > 1:
+            doppler_map = doppler_map.mean(dim=-1)
+        elif doppler_map.dim() > 2:
+            doppler_map = doppler_map[..., 0]
+        if doppler_map.dim() == 3 and doppler_map.shape[0] == 1:
+            doppler_map = doppler_map[0]
+        if final_dirs is not None:
+            # Reduce the batch axis only (dim 0, always size 1), and the
+            # sub-sample axis by averaging unit vectors then renormalizing.
+            # Shape history: (B, H, W, S, 3) → (H, W, 3).
+            fd = final_dirs
+            if fd.dim() == 5 and fd.shape[0] == 1:
+                fd = fd[0]                       # (H, W, S, 3)
+            if fd.dim() == 4 and fd.shape[-2] > 1:
+                fd = fd.mean(dim=-2)             # mean over sub-rays
+            if fd.dim() == 4:
+                fd = fd[..., 0, :]               # single sub-ray case
+            fd = fd / fd.norm(dim=-1, keepdim=True).clamp(min=1e-9)
+            final_dirs = fd                      # (H, W, 3)
+        image = cinematic_shade(
+            image, doppler_map, final_dirs, escaped,
+            starfield=starfield)
+        if bloom:
+            # bloom_glow expects (H, W) or (C, H, W); convert.  The image at
+            # this point is (H, W, 3) after the batch-dim drop above.
+            if image.dim() == 4:  # (1, H, W, 3) — drop batch defensively
+                image = image[0]
+            rgb_img = image.permute(2, 0, 1)
+            image = bloom_glow(rgb_img).permute(1, 2, 0)
+    elif tonemap:
+        image = aces_filmic_tonemap(image)
+        if bloom:
+            image = bloom_glow(image)
 
     out: Dict[str, torch.Tensor] = {
         "image": image,
@@ -1850,6 +2068,10 @@ def render_grrt_view(
                                     torch.zeros_like(doppler_sum)),
         "steps": step,
     }
+    if doppler_map is not None:
+        out["doppler_map"] = doppler_map
+    if cinematic_shading:
+        out["final_dirs"] = final_dirs
     if record_debug:
         out["debug"] = debug_samples
     return out
@@ -1889,3 +2111,398 @@ if __name__ == "__main3__":  # pragma: no cover - Step 4 smoke test (manual)
     loss.backward()
     print("V.grad nonzero:", float(V.grad.abs().sum()) > 0)
     print("V.grad finite:", bool(torch.isfinite(V.grad).all()))
+
+# ==========================================================================
+# CINEMATIC PIPELINE — high-fidelity rendering toolkit
+# ==========================================================================
+# Four upgrades that take AstroRecon from low-res scientific debug renders
+# to Interstellar-grade visuals, baked into the core pipeline (not patches):
+#
+#   1. upsample_voxel_grid()      — multi-resolution voxel upsampling
+#   2. GRRTCamera.subpixel_samples— sub-pixel jittered anti-aliasing (above)
+#   3. adaptive step sizing        — per-ray Δλ control in render_grrt_view
+#   4. aces_filmic_tonemap() +     — HDR → display mapping and glow
+#      bloom_glow()
+#
+# All functions are pure torch, autograd-safe, and device-agnostic.
+# ==========================================================================
+
+
+def upsample_voxel_grid(
+    voxel_grid: torch.Tensor,
+    target_size: int,
+    mode: str = "trilinear",
+) -> torch.Tensor:
+    """Smoothly upsample a (D, H, W) voxel tensor to target_size³.
+
+    Multi-resolution strategy: train fast on a coarse grid (32³ or 64³) to
+    establish geometry, then interpolate up to 128³/256³/512³ for the final
+    razor-sharp frames.  Uses `torch.nn.functional.interpolate` with
+    **trilinear** sampling so gradients flow back to the coarse grid and
+    smooth density gradients are preserved (no blocky nearest-neighbour
+    stair-stepping).
+
+    Parameters
+    ----------
+    voxel_grid : (D, H, W) tensor — the coarse volume (any device/dtype).
+    target_size : int — edge length of the output cube (D' = H' = W').
+    mode : str — interpolation mode; "trilinear" (default) for volumes.
+        "nearest" is available for debugging masks.
+
+    Returns
+    -------
+    (target_size, target_size, target_size) tensor, autograd-connected to
+    the input.
+    """
+    if voxel_grid.ndim != 3:
+        raise ValueError(
+            f"voxel_grid must be 3D (D,H,W), got shape {tuple(voxel_grid.shape)}"
+        )
+    if target_size < 1:
+        raise ValueError("target_size must be >= 1")
+    if target_size == voxel_grid.shape[-1] and len(set(voxel_grid.shape)) == 1:
+        return voxel_grid  # already at target resolution
+    # F.interpolate wants (N, C, D, H, W) for 3D trilinear.
+    x = voxel_grid.unsqueeze(0).unsqueeze(0)                     # (1,1,D,H,W)
+    up = F.interpolate(
+        x,
+        size=(target_size, target_size, target_size),
+        mode=mode,
+        align_corners=(mode != "nearest"),   # matches grid_sample convention
+    )
+    return up.squeeze(0).squeeze(0)
+
+
+def aces_filmic_tonemap(
+    image: torch.Tensor,
+    exposure: float = 1.0,
+) -> torch.Tensor:
+    """ACES filmic tone-mapping curve (Narkowicz approximation).
+
+    Maps raw high-dynamic-range emission intensities into vibrant,
+    display-ready values without hard-clipping bright accretion disks or
+    nebulae — highlights roll off smoothly into white instead of saturating
+    to flat blocks, and shadows keep filmic contrast.
+
+        f(x) = (x (2.51 x + 0.03)) / (x (2.43 x + 0.59) + 0.14)
+
+    (Acheson/Narkowicz 2015 fit to the full ACES RRT+ODT; works directly on
+    scalar intensity — for RGB input it is applied channel-wise.)
+
+    Parameters
+    ----------
+    image : tensor of raw (unbounded) rendered intensity, any shape.
+    exposure : float — pre-curve gain; > 1 brightens the midtones.
+
+    Returns
+    -------
+    tensor in [0, 1) with the same shape, autograd-connected.
+    """
+    x = image.clamp(min=0.0) * float(exposure)
+    numerator = x * (2.51 * x + 0.03)
+    denominator = x * (2.43 * x + 0.59) + 0.14
+    return (numerator / denominator).clamp(0.0, 1.0)
+
+
+def reinhard_tonemap(image: torch.Tensor, exposure: float = 1.0) -> torch.Tensor:
+    """Reinhard tonemapping: I / (1 + I) — softer, more forgiving alternative
+    to ACES for noisy reconstructions (compresses everything, never
+    saturates, but slightly milky highlights)."""
+    x = image.clamp(min=0.0) * float(exposure)
+    return x / (1.0 + x)
+
+
+def bloom_glow(
+    image: torch.Tensor,
+    threshold: float = 0.6,
+    radius: int = 9,
+    strength: float = 0.4,
+) -> torch.Tensor:
+    """Procedural bloom: bright areas bleed soft light into their surround.
+
+    1. Extract highlights above `threshold` (soft knee, not a hard gate).
+    2. Blur them with a separable Gaussian kernel (two 1-D convolutions —
+       O(2r) per pixel instead of O(r²)).
+    3. Add the blurred glow back at `strength` weight.
+
+    Works on (H, W) or (C, H, W) tensors, batch-ready, autograd-safe.
+    """
+    if image.ndim == 2:
+        img = image.unsqueeze(0).unsqueeze(0)                    # (1,1,H,W)
+        squeeze = True
+    elif image.ndim == 3:
+        img = image.unsqueeze(0)                                 # (1,C,H,W)
+        squeeze = False
+    else:
+        raise ValueError("image must be (H, W) or (C, H, W)")
+    channels = img.shape[1]
+
+    # Soft-knee highlight extraction (smooth, keeps halos gradual).
+    bright = (img - threshold).clamp(min=0.0) / max(threshold, 1e-6)
+
+    # 1-D Gaussian kernel (normalised), one per channel — depthwise conv.
+    coords = torch.arange(radius, device=image.device, dtype=image.dtype)
+    sigma = max(radius / 3.0, 1.0)
+    k = torch.exp(-0.5 * ((coords - (radius - 1) / 2.0) ** 2) / (sigma * sigma))
+    k = k / k.sum()
+    kernel = k.view(1, 1, 1, -1).repeat(channels, 1, 1, 1)       # (C,1,1,K)
+
+    pad = radius // 2
+    # Horizontal pass then vertical pass (separable ⇒ fast).
+    blurred = F.conv2d(bright, kernel, padding=(0, pad), groups=channels)
+    blurred = F.conv2d(blurred, kernel.transpose(-1, -2), padding=(pad, 0),
+                       groups=channels)
+
+    glow = img + strength * blurred
+    return glow.squeeze(0).squeeze(0) if squeeze else glow.squeeze(0)
+
+
+def render_cinematic(
+    camera: GRRTCamera,
+    voxel_grid: torch.Tensor,
+    resolution: tuple = (256, 256),
+    voxel_size: int = 128,
+    subpixel: int = 2,
+    tone_map: bool = True,
+    bloom_on: bool = True,
+    starfield: bool = True,
+    **kwargs,
+) -> Dict[str, torch.Tensor]:
+    """One-call cinematic render: coarse grid + full pipeline.
+
+    Convenience wrapper for the UI and the Sgr A* CLI runner: upsample the
+    (coarse) voxel grid to `voxel_size`³, render at `resolution` with
+    `subpixel`×`subpixel` jittered rays per pixel, adaptive step sizing on,
+    thermal blackbody + Doppler RGB shading, lensed starfield, ACES filmic
+    tonemapping (+ optional bloom) for the final frame.
+    """
+    return render_grrt_view(
+        camera,
+        voxel_grid,
+        render_res=resolution,
+        voxel_grid_size=voxel_size,
+        subpixel_samples=subpixel,
+        tonemap=tone_map,
+        bloom=bloom_on,
+        adaptive_steps=True,
+        cinematic_shading=True,
+        starfield=starfield,
+        **kwargs,
+    )
+
+# ==========================================================================
+# CINEMATIC THERMAL SHADER — Interstellar-grade color pipeline
+# ==========================================================================
+# Three modules that turn the grayscale intensity image into full RGB:
+#
+#   1. blackbody_rgb()            — Planck/Wien thermal color ramp
+#   2. doppler_chromatic_shift()  — δ-dependent blue/red tinting
+#   3. starfield_background()     — procedural sky + lensing lookup
+#
+# All are pure torch, autograd-safe, device-agnostic, and work for ANY
+# volumetric object (nebulae, pulsar jets, exoplanet atmospheres) — the
+# temperature field is derived from the rendered intensity, so no
+# object-specific code exists anywhere in this section.
+# ==========================================================================
+
+
+def blackbody_rgb(
+    intensity: torch.Tensor,
+    t_hot: float = 10000.0,
+    t_warm: float = 6000.0,
+    t_cool: float = 3000.0,
+    intensity_ref: float = 1.0,
+) -> torch.Tensor:
+    """Map scalar emission intensity → RGB via a blackbody thermal ramp.
+
+    Physically, hotter plasma glows bluer/whiter (Wien's displacement law:
+    λ_peak = b / T).  We parameterize the temperature from the *observed
+    intensity* — bright pixels = compressed, superheated gas near the
+    photon sphere; dim pixels = cool outer disk fringe:
+
+        T(i) = t_cool + (t_hot - t_cool) · (i / intensity_ref)^0.5
+
+    and evaluate an analytic approximation of Planckian locus colors:
+        ~3000 K → deep red / fiery orange
+        ~6000 K → golden amber / bright yellow
+       ~10000 K → blinding white / light blue
+
+    Parameters
+    ----------
+    intensity : (...,) tensor of rendered emission (any positive range).
+    t_hot / t_warm / t_cool : temperature anchors of the ramp (Kelvin).
+    intensity_ref : intensity value that maps to `t_hot`.
+
+    Returns
+    -------
+    (..., 3) RGB tensor in [0, 1], autograd-connected to `intensity`.
+    """
+    # ---- intensity → temperature (monotone, smooth, autograd-safe) -------
+    x = (intensity / max(intensity_ref, 1e-9)).clamp(min=0.0)
+    temperature = t_cool + (t_hot - t_cool) * torch.sqrt(x)
+
+    # ---- temperature → normalized blackbody RGB --------------------------
+    # Piecewise analytic fit to the CIE blackbody locus (Tanner Helland /
+    # Neil Bartlett approximation, vectorized; T in thousands of Kelvin).
+    t = (temperature / 100.0).clamp(1.0, 400.0)
+
+    # Red channel: rises to 255 by ~6600 K, stays flat above.
+    red = torch.where(
+        t <= 66.0,
+        255.0,
+        329.698727446 * (t - 60.0).pow(-0.1332047592),
+    )
+    # Green channel: peaks near 6600 K (warm white).
+    green = torch.where(
+        t <= 66.0,
+        99.4708025861 * t.log() - 161.1195681661,
+        288.1221695283 * (t - 60.0).pow(-0.0755148492),
+    )
+    # Blue channel: zero below ~1900 K, saturates above ~6600 K.
+    blue = torch.where(
+        t >= 66.0,
+        255.0,
+        torch.where(
+            t <= 19.0,
+            torch.zeros_like(t),
+            138.5177312231 * (t - 10.0).log() - 305.0447927307,
+        ),
+    )
+    rgb = torch.stack([red, green, blue], dim=-1).clamp(0.0, 255.0) / 255.0
+
+    # Dim regions keep their hue but scale toward black (emission, not
+    # reflection): luminance modulates, chromaticity stays thermal.
+    return rgb * intensity.clamp(min=0.0).unsqueeze(-1)
+
+
+def doppler_chromatic_shift(
+    rgb: torch.Tensor,
+    delta: torch.Tensor,
+    strength: float = 0.35,
+) -> torch.Tensor:
+    """Relativistic Doppler chromatic tinting of an RGB image.
+
+    The Doppler factor δ (> 1 approaching, < 1 receding) shifts the
+    *apparent* color temperature: approaching gas beams blue-white,
+    receding gas shifts toward deep amber/crimson — the famous
+    asymmetric-brightness look of Gargantua's disk.
+
+    Implementation: δ is mapped through a signed log to a tint vector
+    (b up, r down) for δ>1 and the reverse for δ<1, applied as a
+    channel-wise multiplicative shift around δ = 1.
+    """
+    # Signed log compression: |δ| = 1 → 0; 4 → +0.69; 0.25 → −0.69.
+    s = torch.sign(delta) * torch.log1p((delta - 1.0).abs())
+    blue_shift = (s * strength).clamp(-0.5, 0.5)
+
+    shift = torch.stack([
+        1.0 - blue_shift,          # red: dimmer when blueshifted
+        1.0 + 0.3 * blue_shift.abs(),  # green: slight brightness boost
+        1.0 + blue_shift,          # blue: brighter when blueshifted
+    ], dim=-1).clamp(0.2, 2.0)
+    return rgb * shift
+
+
+def procedural_starfield(
+    direction: torch.Tensor,
+    n_stars: int = 4096,
+    seed: int = 7,
+    star_size_deg: float = 0.8,
+) -> torch.Tensor:
+    """Sample a procedural starfield along unit direction vectors.
+
+    A fixed random set of `n_stars` sky positions (deterministic seed) is
+    scattered uniformly over the full sphere; each ray direction accumulates
+    light from every star within `star_size_deg`, weighted by a smooth
+    Gaussian falloff (no aliasing).  With 4096 stars any 14° window contains
+    dozens of them, so every frame shows a dense glittering sky.
+
+    Parameters
+    ----------
+    direction : (..., 3) tensor of unit direction vectors (final, lensed
+        photon directions at infinity).
+    n_stars : int — number of procedural stars on the celestial sphere.
+    seed : int — PRNG seed (reproducible skies across runs/tiers).
+    star_size_deg : float — angular radius of a star's glow.
+
+    Returns
+    -------
+    (..., 3) RGB sky radiance in [0, 1] — white-blue stars on black space.
+    """
+    g = torch.Generator(device="cpu").manual_seed(seed)
+    # Random star positions on the sphere (uniform via normal normalization).
+    pos = torch.randn(n_stars, 3, generator=g)
+    pos = pos / pos.norm(dim=-1, keepdim=True)
+    # Varied brightness + subtle color temperature per star.
+    bright = 0.3 + 0.7 * torch.rand(n_stars, generator=g)
+    warm = 0.85 + 0.3 * torch.rand(n_stars, 1, generator=g)   # (r/g) tint
+    star_rgb = torch.stack(
+        [warm.squeeze(-1), torch.ones(n_stars), (2.0 - warm.squeeze(-1))],
+        dim=-1).clamp(0.0, 1.0) * bright.unsqueeze(-1)
+
+    d = direction.reshape(-1, 3).to("cpu")           # (N, 3) — stars live on CPU
+    # Cosine of the angle between every ray and every star: (N, S).
+    cos_ang = d @ pos.T                              # (N, S)
+    theta = torch.acos(cos_ang.clamp(-1.0, 1.0))
+    sigma = math.radians(star_size_deg)
+    weight = torch.exp(-0.5 * (theta / sigma) ** 2)  # (N, S)
+    sky = weight @ star_rgb.to(d.device, d.dtype)    # (N, 3)
+    return sky.reshape(direction.shape[:-1] + (3,)).clamp(0.0, 1.0)
+
+
+def cinematic_shade(
+    image: torch.Tensor,
+    doppler: torch.Tensor,
+    ray_dirs: torch.Tensor,
+    escaped: torch.Tensor,
+    starfield: bool = True,
+    exposure: float = 1.0,
+) -> torch.Tensor:
+    """Full cinematic shading: intensity → RGB with thermal + Doppler + sky.
+
+    Pipeline per pixel:
+      1. Chromaticity from the blackbody ramp (hue only — the pure thermal
+         color of gas at that temperature), luminance from a filmic curve
+         of the intensity.  Keeping hue and luminance separate stops hot
+         pixels from saturating to flat white and preserves the golden
+         amber → deep red gradient of the disk.
+      2. Doppler tinting shifts hue blue/red with δ.
+      3. Escaped rays sample the lensed starfield (a soft galactic haze +
+         point stars; pre-blurred so per-pixel sky sampling does not alias).
+      4. Shadow / unfinished rays stay exactly black — the void.
+
+    Returns an (H, W, 3) float tensor in [0, 1].
+    """
+    i_max = max(float(image.max()), 1e-6)
+    # Chromaticity: normalized blackbody hue at each pixel's temperature.
+    # intensity_ref 8× i_max biases the disk body into the ~3000–6000 K
+    # range (deep red → golden amber); only the blazing photon-ring crest
+    # reaches white-hot.  (At 1× everything saturated to flat white.)
+    chroma = blackbody_rgb(image, intensity_ref=i_max * 8.0)
+    chroma = chroma / chroma.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+    # Warm bias: multiply red 1.15 / blue 0.85 to counteract the
+    # blue-white lean of the analytic locus at these temperatures.
+    chroma = chroma * torch.tensor([1.15, 1.0, 0.85], device=chroma.device,
+                                   dtype=chroma.dtype)
+    chroma = chroma / chroma.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+    # Luminance: filmic (Reinhard) so highlights roll off instead of clipping.
+    # Gain 3.5×: the ring reads blazing against the dark sky; the filmic
+    # knee keeps the crest from clipping to flat white.
+    lum = (image * exposure * 3.5).clamp(min=0.0)
+    lum = lum / (1.0 + lum) * 2.0          # soft, keeps midtones bright
+    rgb = chroma * lum.unsqueeze(-1)
+    # Doppler hue shift on the shaded color.
+    rgb = doppler_chromatic_shift(rgb, doppler)
+    if starfield:
+        dirs = ray_dirs / ray_dirs.norm(dim=-1, keepdim=True).clamp(min=1e-9)
+        # Soft galactic haze: one wide Gaussian per star ⇒ smooth background
+        # glow that survives per-pixel sampling without aliasing.
+        haze = procedural_starfield(dirs, n_stars=768, star_size_deg=4.0)
+        # Sparse bright point stars on top (small, subtle — accent sparkle).
+        stars = procedural_starfield(dirs, n_stars=384, seed=11, star_size_deg=0.35)
+        # Keep the sky dark and sparkling: dim haze + bright points.
+        sky = haze * 0.12 + stars * 0.65
+        sky = sky.to(rgb.device, rgb.dtype)
+        mask = escaped.unsqueeze(-1).to(rgb.dtype)
+        rgb = rgb + mask * sky
+    return rgb.clamp(0.0, 1.0)

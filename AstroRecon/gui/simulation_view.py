@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
     QListWidget, QListWidgetItem, QProgressBar, QWidget, QScrollArea,
     QMenuBar, QAction, QActionGroup, QMessageBox, QInputDialog, QApplication,
-    QTabWidget, QPlainTextEdit, QSizePolicy,
+    QTabWidget, QPlainTextEdit, QSizePolicy, QComboBox,
 )
 
 from .theme import Palette
@@ -249,6 +249,9 @@ class SimulationView(QDialog):
         # NOTE: order matters — _view_mode must exist before _build_menus()
         # runs (it reads it to seed the checked View action).
         self._view_mode = "Live Model Reconstruction"
+        # Render fidelity state (overridden by the resolution dropdown):
+        self.render_pixel_res = (64, 64)
+        self.render_voxel_res = 32
         self.menu_bar = QMenuBar(self)
         self.menu_bar.setNativeMenuBar(False)
         self.menu_bar.setObjectName("TopMenuBar")
@@ -423,6 +426,22 @@ class SimulationView(QDialog):
         self.status_lbl.setObjectName("Dim")
         ctrl.addWidget(self.pause_btn)
         ctrl.addWidget(self.snapshot_btn)
+
+        # ---- resolution selector (cinematic pipeline control) ------------
+        # Dynamically re-routes viewport render fidelity + voxel grid size;
+        # hooked into the GRRT ray marcher via change_simulation_resolution.
+        ctrl.addWidget(QLabel("Resolution:"))
+        self.resolution_combo = QComboBox()
+        self.resolution_combo.addItems([
+            "Fast Prototype (64² / 32³)",
+            "Standard HD (256² / 128³)",
+            "Cinematic Ultra (512² / 256³)",
+            "Interstellar Grade (1024² / 512³)",
+        ])
+        self.resolution_combo.currentIndexChanged.connect(
+            self.change_simulation_resolution)
+        ctrl.addWidget(self.resolution_combo)
+
         ctrl.addStretch(1)
         ctrl.addWidget(self.status_lbl)
         root.addLayout(ctrl)
@@ -448,6 +467,24 @@ class SimulationView(QDialog):
         self._frame_t.start(66)
 
         self.apply_palette(self._palette)
+
+    # ------------------------------------------------------------------
+    # Resolution presets: (pixel_res, voxel_res) per dropdown index.
+    _RESOLUTION_PRESETS = [(64, 32), (256, 128), (512, 256), (1024, 512)]
+
+    def change_simulation_resolution(self, index: int) -> None:
+        """Re-route the ray-marcher camera + voxel grid to a new fidelity.
+
+        Hook point for the GRRT renderer: `render_pixel_res` feeds
+        `render_grrt_view(render_res=...)` and `render_voxel_res` feeds
+        `render_grrt_view(voxel_grid_size=...)` on the next streamed frame.
+        """
+        pixel_res, voxel_res = self._RESOLUTION_PRESETS[index]
+        self.render_pixel_res = (pixel_res, pixel_res)
+        self.render_voxel_res = voxel_res
+        self.status_lbl.setText(
+            f"STATUS: Resolution re-routed to {pixel_res}x{pixel_res} viewport | "
+            f"Voxel Grid: {voxel_res}\u00b3")
 
     def _build_metadata_tabs(self) -> None:
         """Bottom tab strip with astrophysical / processing metadata."""

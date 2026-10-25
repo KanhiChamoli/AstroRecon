@@ -77,6 +77,30 @@ class SourcesModal(QDialog):
         d.setAlignment(Qt.AlignHCenter)
         body.addWidget(d)
 
+        # Universal Data Library banner — the header for the unified
+        # multi-wavelength data source description.
+        lib_banner = QLabel(
+            '<div align="center">'
+            '<span style="font-family: \'Cinzel\', \'Cinzel Decorative\', \'Georgia\', serif; '
+            'font-size: 14px; font-weight: bold; letter-spacing: 2px; color: #38bdf8;">'
+            'POWERED BY THE UNIVERSAL ASTRORECON DATA LIBRARY</span><br>'
+            '<span style="color: #94a3b8; font-size: 11px;">'
+            'A unified, multi-wavelength repository connecting global astronomical archives '
+            '(EHT, NASA SkyView, MAST, VizieR) into a single inverse-rendering intelligence.</span>'
+            '</div>'
+        )
+        lib_banner.setWordWrap(True)
+        lib_banner.setAlignment(Qt.AlignHCenter)
+        lib_banner.setStyleSheet(
+            "QLabel {"
+            "    background: rgba(14, 25, 45, 0.85);"
+            "    border: 1px solid rgba(56, 189, 248, 0.55);"
+            "    border-radius: 8px;"
+            "    padding: 10px 12px;"
+            "}"
+        )
+        body.addWidget(lib_banner)
+
         # Fancy clickable Powered by boxes (WWT first, SkyView below it) —
         # both centered.
         wwt_box = QLabel(

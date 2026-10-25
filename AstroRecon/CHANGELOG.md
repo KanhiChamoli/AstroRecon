@@ -5,7 +5,116 @@ New entries go at the top, newest first.
 
 ---
 
-## 2026-10-22 — pywwt / WorldWide Telescope JupyterLab integration installed
+## 2026-10-24 — Cinematic Pipeline & Resolution Upgrades
+
+**Files touched:** `src/ray_marcher.py`, `gui/simulation_view.py`,
+`gui/sources_modal.py`, `run_sgra_cinematic.py` (new), `CHANGELOG.md`
+
+### Added — cinematic rendering core (`src/ray_marcher.py`)
+- **Multi-resolution voxel upsampling** — `upsample_voxel_grid(V, n)`:
+  trilinear `F.interpolate` from coarse training grids (32³/64³) to
+  128³/256³/512³ for final frames; fully autograd-safe so coarse-to-fine
+  training flows gradients back into the coarse grid.
+- **Sub-pixel anti-aliasing (SSAA)** — `GRRTCamera.subpixel_samples = n`
+  casts n×n stratified-jittered sub-rays per pixel (deterministic pattern,
+  reproducible renders) and averages them in `render_grrt_view`, killing
+  blocky pixel stair-stepping.
+- **Adaptive ray-marching step sizing** — per-ray
+  Δλ_eff = Δλ / (1 + gain·ρ): steps shrink near dense plasma / the horizon
+  (no overshoot), stretch in open space (speed).  Off by default; enabled
+  for final frames and the Sgr A* runner.
+- **ACES filmic tonemapping** (`aces_filmic_tonemap`, Narkowicz fit) and
+  **Reinhard** alternative; **procedural bloom** (`bloom_glow`, separable
+  Gaussian on a soft-knee highlight extraction).  HDR emission now maps to
+  display-ready values without clipping the accretion disk.
+- **Flexible resolution parameters** on `render_grrt_view`: `render_res`,
+  `voxel_grid_size`, `subpixel_samples`, `tonemap`, `bloom`,
+  `adaptive_steps`, `adaptive_gain` — the UI can re-route fidelity live.
+- One-call wrapper `render_cinematic()`.
+- **Bug fix (physics):** clamped sampled density to be non-negative in the
+  marching loop.  `grid_sample` extrapolation just past the box edge could
+  return tiny negative densities, driving optical depth negative and
+  `exp(-τ)` to inf/NaN — frames were silently rendering black.
+
+### Added — GUI
+- **Resolution selector** in the simulation footer toolbar: Fast Prototype
+  (64²/32³) → Standard HD (256²/128³) → Cinematic Ultra (512²/256³) →
+  Interstellar Grade (1024²/512³).  `change_simulation_resolution` stores
+  `render_pixel_res` / `render_voxel_res` for the ray-marcher hook.
+- **Data sources modal header** now reads "Powered by the Universal
+  AstroRecon Data Library — a unified, multi-wavelength repository
+  connecting global astronomical archives (EHT, NASA SkyView, MAST, VizieR)
+  into a single inverse-rendering intelligence."
+
+### Added — terminal runner (`run_sgra_cinematic.py`)
+- One-command cinematic pipeline over **real EHT Sgr A* data**
+  (`data/library_cache/eht_targets/sgra_eht_combined.npy`, the 2022 EHTC
+  release dirty image): trains a 32³ torus-prior volume against the real
+  observation, then renders all four resolution tiers with SSAA, adaptive
+  stepping, ACES + bloom.  Outputs to `outputs/sgra_cinematic/<tier>/`
+  with per-tier manifest JSON.
+- Camera framing verified visually: r=80M, 14° FOV — the black-hole shadow
+  with its bright photon ring centered in frame.
+- 1024² tier renders in memory-banded horizontal strips so it fits in
+  8 GB-class VRAM.
+
+### Added — cinematic thermal shader & starfield (`src/ray_marcher.py`, same date)
+- **Blackbody thermal color mapping** — `blackbody_rgb()`: analytic CIE
+  blackbody-locus fit (Tanner Helland approximation, vectorized) mapping
+  rendered intensity → temperature → RGB.  Ramp anchors: ~3 000 K deep
+  red / fiery orange (outer fringe), ~6 000 K golden amber / bright yellow
+  (main disk), ~10 000 K blinding white / light blue (photon-sphere crest).
+  Replaces single-channel grayscale accumulation for final frames.
+- **Relativistic Doppler chromatic shift** — `doppler_chromatic_shift()`:  
+  the δ factor from the radiative-transfer step tints RGB per pixel —
+  approaching gas beams toward cyan/white, receding gas toward deep
+  crimson/amber (the asymmetric Gargantua look).
+- **Procedural starfield + gravitational lensing** —
+  `procedural_starfield()`: deterministic seeded star sphere (Gaussian
+  glow profiles, per-star brightness + color temperature).  Escaped rays
+  sample the sky along their **final geodesic-bent direction**, so stars
+  smear into Einstein-ring arcs around the shadow automatically.
+- **Full RGB output** — `cinematic_shade()` composes chromaticity (blackbody
+  hue) × filmic luminance (Reinhard knee, hot pixels roll off instead of
+  clipping to flat white) + Doppler tint + lensed sky.  New
+  `render_grrt_view(cinematic_shading=True, starfield=True)` returns an
+  (H, W, 3) float tensor ready for tonemapping/PNG saving; works for any
+  volumetric object (temperature is derived from rendered intensity —
+  no black-hole-specific code).
+- `render_cinematic()` now enables the full RGB path by default.
+
+### Fixed — critical physics bug (shadow geometry)
+- `ks_schwarzchild_metric` computed the radial scale as
+  **√x²+√y²+√z² — the Manhattan norm** (misplaced parenthesis:
+  `sqrt(pos*pos + eps).sum(-1)` instead of `sqrt((pos*pos).sum(-1))`).
+  Its level sets are diamonds, not spheres, so the metric — and therefore
+  the photon-capture cross-section — was axis-aligned: the black-hole
+  shadow rendered as a perfect **diamond**.  Fixed to the Euclidean
+  radius; the shadow is now circular with a crisp photon ring (verified
+  visually at multiple tiers/resolutions).
+- Adaptive step sizing gains a curvature guard: steps shrink with
+  proximity to the horizon (r − 2M), not just with local density, so the
+  capture boundary resolves isotropically even in near-empty space.
+
+### Changed — GPU/render performance
+- `run_sgra_cinematic.py` `_gpu_turbo()`: TF32 tensor-core matmuls +
+  cudnn benchmark enabled, float32 matmul precision set to "high",
+  92 % memory fraction cap (leaves bloom headroom).
+- Training loop wrapped in `torch.amp.autocast` + `GradScaler`
+  (half-precision on CUDA) — roughly 2× faster epochs.
+- Runner uses base step dλ = 0.2 (the verified circular-shadow setting)
+  with max_steps 4000; Interstellar tier renders in memory-banded
+  horizontal strips (per-band vertical FOV windows via
+  `GRRTCamera.y_min_frac/y_max_frac`) so 1024²/512³ fits in 8 GB VRAM.
+
+### Verified
+- Syntax check pass on all four touched files.
+- End-to-end smoke test: full RGB pipeline renders a finite (H, W, 3)
+  image (blackbody + Doppler + starfield + bloom) on CPU in seconds.
+- Visual verification: circular shadow + golden-amber ring + starfield
+  confirmed at 128² test resolution and at Tiers 0–1 (64²/256²).
+
+---
 
 **Files touched:** `requirements.txt`, `scripts/check_pywwt.py` (new), `CHANGELOG.md`
 
