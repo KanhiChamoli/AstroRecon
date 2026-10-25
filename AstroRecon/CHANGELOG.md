@@ -5,6 +5,65 @@ New entries go at the top, newest first.
 
 ---
 
+## 2026-10-25 — Phase 1: Data-Format Selection UI + Universal Pipeline Dispatcher
+
+**Files touched:** `src/pipeline_router.py` (new),
+`gui/format_select_modal.py` (new), `gui/main_window.py`,
+`run_sgra_cinematic.py`, `probe_bl.py`, `gui/main_window.py` (BOM fix),
+`CHANGELOG.md`
+
+### Added — data-format dispatcher (`src/pipeline_router.py`)
+- **Format detection** with layered evidence: FITS header keyword
+  inspection (OBJECT / TELESCOP / CTYPE / BUNIT via lazy astropy) → file
+  extension table → filename heuristics → generic-FITS fallback.
+- **Pipeline routing registry**: `fits` → inverse-rendering ray-marcher
+  (`src.ray_marcher`), `mhd` → Stokes Q/U polarized pipeline
+  (`src.losses`), `uvfits` → interferometric visibility reconstruction
+  (`src.uvfits_imaging`), `optical`/spectroscopic → volumetric marcher.
+- **Modular extension hook** — `register_pipeline(fmt_id, title, module,
+  description, handler)` lets future physics models plug in at runtime
+  without touching the dispatcher; `route_data(path, fmt_hint)` is the
+  public routing entry point.
+- Complements `src/physics_dispatcher.py` (object-class routing: GRRT vs
+  optically-thin vs orbital) — together they form the Phase-2 universal
+  dispatcher: data format × object class → specialized backend.
+
+### Added — "Select Data Format & Pipeline" modal (`gui/format_select_modal.py`)
+- Scrollable 2-column grid of selectable format cards (title, description,
+  target pipeline module shown on each card).
+- Auto-detects and preselects the format of the incoming data path;
+  user selection overrides detection.
+- Bottom action bar: styled **Cancel** (closes, returns to the previous
+  menu) and **Simulate Data** (emits the routing signal).
+- Runtime-registered custom formats appear in the grid automatically.
+
+### Changed — workflow integration (`gui/main_window.py`)
+- "RUN SIMULATION" flow now inserts the format modal between the search /
+  fetch menu and the simulation view, for both library selections and
+  user uploads.  The chosen format is recorded on the sim entry
+  (`pipeline_fmt` / `pipeline_module`) so the backend honors the routing,
+  and the sim-view title shows the active pipeline.
+
+### Fixed — interpreter robustness
+- `run_sgra_cinematic.py` now **self-bootstraps**: if launched with a
+  Python that lacks torch (e.g. system C:\Python315), it re-executes
+  itself under the project environment (`envs/astrorecon-clean`) and
+  errors with a clear message if no environment is found — plain
+  `python run_sgra_cinematic.py` works from any interpreter.
+- Stripped UTF-8 BOMs that broke parsing of `probe_bl.py` and
+  `gui/main_window.py`.
+- Full-project audit: all 62 Python files syntax-clean; core modules and
+  GUI package import without error.
+
+### Verified
+- Dispatcher unit checks: FITS → `fits`, `.uvfits` → `uvfits`, custom
+  registry → routed, user-forced hint honored.
+- Modal: 5 cards rendered (4 built-in + custom), auto-preselection works.
+- End-to-end: main window → routing handler → SimulationView constructed
+  with the selected pipeline.
+
+---
+
 ## 2026-10-24 — Cinematic Pipeline & Resolution Upgrades
 
 **Files touched:** `src/ray_marcher.py`, `gui/simulation_view.py`,

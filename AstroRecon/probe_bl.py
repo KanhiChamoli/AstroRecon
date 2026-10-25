@@ -1,4 +1,4 @@
-﻿import bpy
+import bpy
 m = bpy.data.materials.new("probe")
 m.use_nodes = True
 p = [n for n in m.node_tree.nodes if n.type == "BSDF_PRINCIPLED"][0]

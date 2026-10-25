@@ -1,4 +1,4 @@
-﻿"""Astro Recon â€” top-level window wiring every page/modal together."""
+"""Astro Recon â€” top-level window wiring every page/modal together."""
 from __future__ import annotations
 
 import os
@@ -16,6 +16,8 @@ from .search_modal import SearchModal
 from .settings_drawer import SettingsWindow, SettingsDrawer
 from .simulation_view import SimulationView
 from .sources_modal import SourcesModal
+from .format_select_modal import FormatSelectModal
+from src.pipeline_router import route_data
 
 GITHUB_URL = "https://github.com/"  # TODO: replace with the Aphellion Studios repo URL
 
@@ -152,7 +154,30 @@ class MainWindow(QMainWindow):
         self.sources_modal.exec_()
 
     def _start_simulation(self, entry: dict) -> None:
-        dlg = SimulationView(entry, [entry.get("default_data")] if entry.get("default_data") else [], self)
+        # Phase-1 workflow: the format-selection modal sits between the
+        # search/fetch menu and the simulation view so the user can pick
+        # which pipeline the data is routed through.
+        data_paths = [entry["default_data"]] if entry.get("default_data") else []
+        modal = FormatSelectModal(self, data_paths=data_paths)
+        self.tm.add_listener(modal.apply_palette)
+        modal.simulate_requested.connect(
+            lambda route, paths: self._launch_sim_with_format(entry, route, paths))
+        modal.exec_()
+
+    def _launch_sim_with_format(self, entry: dict, route, paths) -> None:
+        """Route via the chosen FormatRoute, then open the simulation view.
+
+        `route` (src.pipeline_router.FormatRoute) names the pipeline module
+        (src.ray_marcher / src.losses / src.uvfits_imaging / custom) — the
+        routing decision is recorded on the entry so the backend can honor
+        it, and the sim view banner shows the active pipeline.
+        """
+        routed = route_data(paths[0] if paths else None, route.fmt)
+        entry = dict(entry)
+        entry["pipeline_fmt"] = routed.fmt
+        entry["pipeline_module"] = routed.pipeline_module
+        entry["name"] = f"{entry.get('name', 'Object')}  ·  {routed.title}"
+        dlg = SimulationView(entry, paths or ([entry.get("default_data")] if entry.get("default_data") else []), self)
         self.tm.add_listener(dlg.apply_palette)
         dlg.exec_()
 
@@ -163,14 +188,17 @@ class MainWindow(QMainWindow):
         self.sim_view.show()
 
     def _start_simulation_from_upload(self, paths: list) -> None:
-        entry = {
-            "name": f"Custom Object (NU) â€” {paths[0]}",
+        # Same Phase-1 flow for uploaded files: show the format modal first.
+        modal = FormatSelectModal(self, data_paths=paths)
+        self.tm.add_listener(modal.apply_palette)
+        entry0 = {
+            "name": f"Custom Object (NU) — {paths[0]}",
             "kind": "User-uploaded dataset",
             "default_data": None,
         }
-        dlg = SimulationView(entry, paths, self)
-        self.tm.add_listener(dlg.apply_palette)
-        dlg.exec_()
+        modal.simulate_requested.connect(
+            lambda route, p: self._launch_sim_with_format(entry0, route, p))
+        modal.exec_()
 
     def resizeEvent(self, e):  # noqa: N802
         super().resizeEvent(e)

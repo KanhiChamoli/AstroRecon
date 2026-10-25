@@ -7,7 +7,7 @@ through the GRRT inverse renderer with:
   * multi-resolution voxel upsampling (trilinear, autograd-safe),
   * sub-pixel jittered anti-aliasing,
   * adaptive ray-marching step sizing,
-  * ACES filmic tonemapping + procedural bloom.
+  * blackbody RGB + Doppler shading, starfield lensing, ACES + bloom.
 
 Usage (from AstroRecon/, with the project environment):
 
@@ -15,14 +15,62 @@ Usage (from AstroRecon/, with the project environment):
     python run_sgra_cinematic.py --tier 2              # one tier only
     python run_sgra_cinematic.py --epochs 60           # fewer training steps
 
+NOTE: this script re-executes itself under the project environment
+(envs/astrorecon-clean) if launched with a Python that lacks torch —
+so plain `python run_sgra_cinematic.py` works from any interpreter.
+
 Outputs land in outputs/sgra_cinematic/<tier name>/ as PNG renders plus a
 manifest JSON with render metadata.
 """
 from __future__ import annotations
 
+# ---- interpreter guard: re-launch under the project env if needed --------
+# The project env is D:\Astrorecon\envs\astrorecon-clean (torch + CUDA +
+# astropy + ehtim).  A bare `python` (e.g. C:\Python315) has none of that,
+# which surfaced as "ModuleNotFoundError: No module named 'torch'".
+import os
+import sys
+from pathlib import Path
+
+
+def _ensure_project_env() -> None:
+    """Re-exec this script under the project environment when necessary."""
+    try:
+        import torch  # noqa: F401
+        return  # already in a working environment
+    except ImportError:
+        pass
+
+    # Candidate project interpreters, most preferred first.
+    candidates = [
+        Path(sys.executable).drive + r"\Astrorecon\envs\astrorecon-clean\python.exe",
+        r"D:\Astrorecon\envs\astrorecon-clean\python.exe",
+        r"D:\Astrorecon\Git\envs\astrorecon-clean\python.exe",
+    ]
+    for exe in candidates:
+        exe_path = Path(exe)
+        if exe_path.exists():
+            print(f"[bootstrap] torch missing in {sys.executable}; "
+                  f"re-launching under {exe}")
+            # os.execv replaces this process — no shell needed, same console.
+            os.execv(str(exe_path), [str(exe_path), *sys.argv])
+            return  # unreachable
+    # No env found: give a clear, actionable message instead of a traceback.
+    sys.stderr.write(
+        "ERROR: torch is not installed in this Python interpreter\n"
+        f"    ({sys.executable})\n"
+        "and the AstroRecon environment was not found.\n"
+        "Run this script with the project environment instead:\n"
+        r"    D:\Astrorecon\envs\astrorecon-clean\python.exe "
+        + " ".join(sys.argv) + "\n"
+    )
+    raise SystemExit(1)
+
+
+_ensure_project_env()
+
 import argparse
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
