@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software, please cite it using the metadata below.
+title: AstroRecon
+subtitle: >-
+  Differentiable General-Relativistic Ray Tracing and Volumetric
+  Reconstruction from Astronomical Data
+authors:
+  - family-names: Chamoli
+    given-names: Aaradhya
+    orcid: "https://orcid.org/0000-0000-0000-0000"
+version: v0.3.0
+date-released: "2026-10-25"
+license: MIT
+repository-code: "https://github.com/KanhiChamoli/AstroRecon"
+keywords:
+  - black-hole imaging
+  - general relativity
+  - ray tracing
+  - Event Horizon Telescope
+  - Sagittarius A*
+  - inverse problems
+  - computational astrophysics
+  - differentiable programming
+abstract: >-
+  AstroRecon reconstructs 3D density volumes from 2D astronomical
+  observations through a differentiable, GPU-accelerated forward model.
+  For compact objects it integrates null geodesics through a Schwarzschild
+  spacetime in the Kerr-Schild chart, producing black-hole shadows, photon
+  rings, relativistic Doppler beaming, and gravitationally lensed
+  starfields from first principles. It supports FITS image/cube
+  reconstruction and EHT UVFITS interferometric imaging with
+  survey-calibration parameter rows.

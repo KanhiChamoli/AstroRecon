@@ -166,3 +166,13 @@ class FormatSelectModal(QDialog):
             return
         self.simulate_requested.emit(self._selected, self.data_paths)
         self.accept()
+
+    # ------------------------------------------------------------ theme ----
+    def apply_palette(self, palette) -> None:
+        """ThemeManager hook — required so the modal can be theme-listened.
+
+        The card stylesheets are inline (fixed dark-theme colors), so the
+        palette only needs to be accepted; without this method the theme
+        manager raises AttributeError on open and the app aborts.
+        """
+        self._palette = palette  # noqa: F841  (kept for future theming)

@@ -167,22 +167,12 @@ class MainMenuPage(NebulaCanvas):
 
         root.addStretch(2)
 
-        # "Powered by SkyView" + "Powered by Worldwide Telescope" clickable
-        # banners above the footer, side by side so neither loses prominence.
-        banner_row = QHBoxLayout()
-        banner_row.setSpacing(40)
-
-        self.skyview_banner = QLabel(
-            f'<a href="{SKYVIEW_URL}" style="text-decoration: none; color: #38bdf8;">'
-            f'<span style="font-family: \'Cinzel\', \'Cinzel Decorative\', \'Georgia\', serif; font-size: 14px; font-weight: bold; letter-spacing: 2px;">'
-            f'✧ POWERED BY SKYVIEW ✧</span></a>'
-        )
-        self.skyview_banner.setAlignment(Qt.AlignCenter)
-        self.skyview_banner.setOpenExternalLinks(True)
-        self.skyview_banner.setCursor(Qt.PointingHandCursor)
-        self.skyview_banner.setToolTip("Click to visit NASA's SkyView Observatory")
-        banner_row.addStretch(1)
-        banner_row.addWidget(self.skyview_banner)
+        # "Powered by" banners: WWT on top, SkyView below it, both centered.
+        # (Previously side by side — user wants a vertically stacked,
+        # horizontally centered column above the footer.)
+        banner_col = QVBoxLayout()
+        banner_col.setSpacing(4)
+        banner_col.setAlignment(Qt.AlignHCenter)
 
         self.wwt_banner = QLabel(
             f'<a href="{WWT_URL}" style="text-decoration: none; color: #38bdf8;">'
@@ -193,12 +183,25 @@ class MainMenuPage(NebulaCanvas):
         self.wwt_banner.setOpenExternalLinks(True)
         self.wwt_banner.setCursor(Qt.PointingHandCursor)
         self.wwt_banner.setToolTip("Click to visit the WorldWide Telescope (AAS)")
-        banner_row.addWidget(self.wwt_banner)
-        banner_row.addStretch(1)
-        root.addLayout(banner_row)
+        banner_col.addWidget(self.wwt_banner, 0, Qt.AlignHCenter)
+
+        self.skyview_banner = QLabel(
+            f'<a href="{SKYVIEW_URL}" style="text-decoration: none; color: #38bdf8;">'
+            f'<span style="font-family: \'Cinzel\', \'Cinzel Decorative\', \'Georgia\', serif; font-size: 14px; font-weight: bold; letter-spacing: 2px;">'
+            f'✧ POWERED BY SKYVIEW ✧</span></a>'
+        )
+        self.skyview_banner.setAlignment(Qt.AlignCenter)
+        self.skyview_banner.setOpenExternalLinks(True)
+        self.skyview_banner.setCursor(Qt.PointingHandCursor)
+        self.skyview_banner.setToolTip("Click to visit NASA's SkyView Observatory")
+        banner_col.addWidget(self.skyview_banner, 0, Qt.AlignHCenter)
+
+        root.addLayout(banner_col)
         root.addSpacing(6)
 
-        # Bottom footer row: SkyView logo button on bottom-left, copyright in center
+        # Bottom footer row: logos left/right balanced so the copyright
+        # text sits exactly centered in the window (not offset by the
+        # left-side logo weights).
         footer_row = QHBoxLayout()
         footer_row.setContentsMargins(20, 0, 20, 16)
 
@@ -242,6 +245,8 @@ class MainMenuPage(NebulaCanvas):
             self.wwt_logo_btn.setStyleSheet("color: #38bdf8; font-weight: bold;")
         footer_row.addWidget(self.wwt_logo_btn, 0, Qt.AlignLeft | Qt.AlignVCenter)
 
+        # Copyright truly centered: balance left logos with a stretch on
+        # both sides rather than a fixed-width spacer guess.
         footer_row.addStretch(1)
 
         # footer copyright text
@@ -253,10 +258,6 @@ class MainMenuPage(NebulaCanvas):
         footer_row.addWidget(self.footer, 0, Qt.AlignCenter)
 
         footer_row.addStretch(1)
-        # Placeholder spacer on right to keep copyright centered
-        right_spacer = QWidget()
-        right_spacer.setFixedWidth(self.logo_btn.width() + self.wwt_logo_btn.width() + 10)
-        footer_row.addWidget(right_spacer, 0, Qt.AlignRight)
 
         root.addLayout(footer_row)
 

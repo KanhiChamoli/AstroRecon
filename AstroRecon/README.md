@@ -90,7 +90,6 @@ the collaboration's released images before making scientific claims.
 FITS tables and hypercubes with more than three image axes are detected and
 reported as unsupported rather than guessed. Their calibration/product
 semantics must be supplied before a correct processor can be selected.
-```
 
 The input is background-subtracted, contrast-stretched, and Gaussian-filtered;
 TV regularization then smooths the image while retaining bright structures.
@@ -155,13 +154,4 @@ $$\mathcal L=\operatorname{MSE}(\hat I,I_{\mathrm{obs}})
 
 Magnetic-field divergence is not modeled because no magnetic-field data is
 loaded. FITS ingestion and synthetic smoke training are implemented; scientific
-validation still depends on suitable observations and boundary conditions.
-# AstroRecon: 3D Volumetric Nebular Reconstruction
-
-## Mathematical Formulation
-
-### 1. Forward Ray Marcher Model (Optically Thin Radiative Transfer)
-$$I_{\text{synthetic}}(u, v) = \sum_{t} V(x(t), y(t), z(t)) \cdot \Delta t$$
-
-### 2. Multi-Term Loss Function (Data Fit + Physical Regularization)
-$$\mathcal{L}_{\text{total}} = \|\hat{I} - I_{\text{observed}}\|^2_2 + \lambda_{\text{TV}} \mathcal{L}_{\text{TV}}(V) + \lambda_{\text{MHD}} \|\nabla \cdot \mathbf{B}\|^2$$
+validation still depends on suitable observations and boundary conditions.$
